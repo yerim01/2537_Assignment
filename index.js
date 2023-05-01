@@ -15,7 +15,7 @@ const app = express();
 const Joi = require("joi");
 
 
-const expireTime = 24 * 60 * 60 * 1000; //expires after 1 day  (hours * minutes * seconds * millis)
+const expireTime = 1 * 60 * 60 * 1000; //expires after 1 hour  (hours * minutes * seconds * millis)
 
 /* secret information section */
 const mongodb_host = process.env.MONGODB_HOST;
@@ -49,7 +49,20 @@ app.use(session({
 ));
 
 app.get('/', (req,res) => {
-    res.send("<h1>Hello World!</h1>");
+    if (!req.session.authenticated) {
+        var html = `
+        <div><a href="/signup">Sign Up</a></div>
+        <div><a href="/login">Log In</a></div>
+        `;
+        res.send(html);
+    } else {
+        var html = `
+        <p>Hello, ${req.session.name}!</p>
+        <form action='/members' method='get'><button>Go To Members Area</button></form>
+        <form action='/logout' method='get'><button>Logout</button></form>
+        `;
+        res.send(html);
+    }
 });
 
 app.get('/nosql-injection', async (req,res) => {
@@ -85,41 +98,17 @@ app.get('/nosql-injection', async (req,res) => {
 app.get('/about', (req,res) => {
     var color = req.query.color;
 
-    res.send("<h1 style='color:"+color+";'>Patrick Guichon</h1>");
-});
-
-app.get('/contact', (req,res) => {
-    var missingEmail = req.query.missing;
-    var html = `
-        email address:
-        <form action='/submitEmail' method='post'>
-            <input name='email' type='text' placeholder='email'>
-            <button>Submit</button>
-        </form>
-    `;
-    if (missingEmail) {
-        html += "<br> email is required";
-    }
-    res.send(html);
-});
-
-app.post('/submitEmail', (req,res) => {
-    var email = req.body.email;
-    if (!email) {
-        res.redirect('/contact?missing=1');
-    }
-    else {
-        res.send("Thanks for subscribing with your email: "+email);
-    }
+    res.send("<h1 style='color:"+color+";'>Yerim Moon</h1>");
 });
 
 
-app.get('/createUser', (req,res) => {
+app.get('/signup', (req,res) => {
     var html = `
     create user
-    <form action='/submitUser' method='post'>
-    <input name='username' type='text' placeholder='username'>
-    <input name='password' type='password' placeholder='password'>
+    <form action='/signupSubmit' method='post'>
+    <input name='name' type='text' placeholder='name'></br>
+    <input name='email' type='email' placeholder='email'></br>
+    <input name='password' type='password' placeholder='password'></br>
     <button>Submit</button>
     </form>
     `;
@@ -130,8 +119,8 @@ app.get('/createUser', (req,res) => {
 app.get('/login', (req,res) => {
     var html = `
     log in
-    <form action='/loggingin' method='post'>
-    <input name='username' type='text' placeholder='username'>
+    <form action='/loginSubmit' method='post'>
+    <input name='email' type='email' placeholder='email'>
     <input name='password' type='password' placeholder='password'>
     <button>Submit</button>
     </form>
@@ -139,102 +128,125 @@ app.get('/login', (req,res) => {
     res.send(html);
 });
 
-app.post('/submitUser', async (req,res) => {
-    var username = req.body.username;
+app.post('/signupSubmit', async (req,res) => {
+    var name = req.body.name;
+    var email = req.body.email;
     var password = req.body.password;
 
-	const schema = Joi.object(
-		{
-			username: Joi.string().alphanum().max(20).required(),
-			password: Joi.string().max(20).required()
-		});
+	const schema = Joi.object({
+		name: Joi.string().alphanum().max(20).required(),
+        email: Joi.string().email().required(),
+		password: Joi.string().max(20).required()
+	});
 	
-	const validationResult = schema.validate({username, password});
+	const validationResult = schema.validate({name, email, password});
 	if (validationResult.error != null) {
-	   console.log(validationResult.error);
-	   res.redirect("/createUser");
-	   return;
-   }
+        var errorMessage = validationResult.error.message;
+        console.log(validationResult.error);
+        var html = `
+        ${errorMessage}.</br>
+        <a href="/signup">Try Again</a>
+        `;
+        res.send(html);
+        return;
+    }
 
     var hashedPassword = await bcrypt.hash(password, saltRounds);
 	
-	await userCollection.insertOne({username: username, password: hashedPassword});
+	await userCollection.insertOne({name: name, email: email, password: hashedPassword});
 	console.log("Inserted user");
 
-    var html = "successfully created user";
-    res.send(html);
+    req.session.authenticated = true;
+    req.session.name = name;
+    req.session.cookie.maxAge = expireTime;
+    res.redirect('/members');
 });
 
-app.post('/loggingin', async (req,res) => {
-    var username = req.body.username;
+app.post('/loginSubmit', async (req, res) => {
+    var email = req.body.email;
     var password = req.body.password;
 
-	const schema = Joi.string().max(20).required();
-	const validationResult = schema.validate(username);
+	const schema = Joi.object({
+        email: Joi.string().email().required(),
+		password: Joi.string().max(20).required()
+	});
+	
+	const validationResult = schema.validate({email, password});
 	if (validationResult.error != null) {
-	   console.log(validationResult.error);
-	   res.redirect("/login");
-	   return;
-	}
-
-	const result = await userCollection.find({username: username}).project({username: 1, password: 1, _id: 1}).toArray();
-
-	console.log(result);
-	if (result.length != 1) {
-		console.log("user not found");
-		res.redirect("/login");
-		return;
-	}
-	if (await bcrypt.compare(password, result[0].password)) {
-		console.log("correct password");
-		req.session.authenticated = true;
-		req.session.username = username;
-		req.session.cookie.maxAge = expireTime;
-
-		res.redirect('/loggedIn');
-		return;
-	}
-	else {
-		console.log("incorrect password");
-		res.redirect("/login");
-		return;
-	}
-});
-
-app.get('/loggedin', (req,res) => {
-    if (!req.session.authenticated) {
-        res.redirect('/login');
+        var errorMessage = validationResult.error.message;
+        console.log(validationResult.error);
+        var html = `
+        ${errorMessage}.</br>
+        <a href="/login">Try Again</a>
+        `;
+        res.send(html);
+        return;
     }
-    var html = `
-    You are logged in!
-    `;
-    res.send(html);
+	
+    const result = await userCollection.findOne({ email });
+    if (!result) {
+        const html = `
+            Invalid email/password combination.</br>
+            <a href='/login'>Try Again </a>
+        `;
+        return res.send(html);
+    }
+
+    const passwordMatches = await bcrypt.compare(password, result.password);
+    if (passwordMatches) {
+        req.session.authenticated = true;
+        req.session.name = result.name;
+        req.session.email = email;
+        req.session.cookie.maxAge = expireTime;
+
+        return res.redirect('/members');
+    } else {
+        const html = `
+            Invalid email/password combination.</br>
+            <a href='/login'>Try Again</a>
+        `;
+        return res.send(html);
+    }
 });
 
-app.get('/logout', (req,res) => {
-	req.session.destroy();
-    var html = `
-    You are logged out.
-    `;
-    res.send(html);
-});
+app.get('/members', (req,res) => {
+    if (!req.session.authenticated) {
+        res.redirect('/');
+        return;
+    }
 
-
-app.get('/cat/:id', (req,res) => {
-
-    var cat = req.params.id;
+    var cat = Math.floor(Math.random() * 3) + 1;
 
     if (cat == 1) {
-        res.send("Fluffy: <img src='/fluffy.gif' style='width:250px;'>");
+        var html = `
+        <h1> Hello, ${req.session.name}</h1></br>
+        <img src='/fluffy.gif' style='width:250px;'></br>
+        <a href='/logout'>Sign out</a>`;
+        res.send(html);
     }
     else if (cat == 2) {
-        res.send("Socks: <img src='/socks.gif' style='width:250px;'>");
+        var html = `
+        <h1> Hello, ${req.session.name}</h1></br>
+        <img src='/socks.gif' style='width:250px;'></br>
+        <a href='/logout'>Sign out</a>`;
+        res.send(html);
+    }
+    else if (cat == 3) {
+        var html = `
+        <h1> Hello, ${req.session.name}</h1></br>
+        <img src='/computer.gif' style='width:250px;'></br>
+        <a href='/logout'>Sign out</a>`;
+        res.send(html);
     }
     else {
         res.send("Invalid cat id: "+cat);
     }
 });
 
+app.get('/logout', (req,res) => {
+    req.session.destroy();
+    res.redirect('/');
+});
 
 app.use(express.static(__dirname + "/public"));
 
