@@ -2,6 +2,7 @@
 require("./utils.js");
 
 require('dotenv').config();
+const url = require('url');
 const express = require('express');
 const session = require('express-session');
 const MongoStore = require('connect-mongo');
@@ -31,9 +32,19 @@ var {database} = include('databaseConnection');
 
 const userCollection = database.db(mongodb_database).collection('users');
 
+const { ObjectId } = require('mongodb');
+
 app.set('view engine', 'ejs');
 
-app.use(express.urlencoded({extended: false}));
+const navLinks = [
+    {name: "Home", link: "/"},
+    {name: "Members", link: "/members"},
+    {name: "Login", link: "/login"},
+    {name: "Admin", link: "/admin"},
+    {name: "404", link: "/moon"}
+]
+
+app.use(express.urlencoded({extended: false})); //middle ware
 
 var mongoStore = MongoStore.create({
 	mongoUrl: `mongodb+srv://${mongodb_user}:${mongodb_password}@${mongodb_host}/sessions`,
@@ -50,34 +61,67 @@ app.use(session({
 }
 ));
 
+function isValidSession(req) {
+    if (req.session.authenticated) {
+        return true;
+    }
+    return false;
+}
+
+function sessionValidation(req,res,next) {
+    if (isValidSession(req)) {
+        next();
+    }
+    else {
+        res.redirect('/login');
+    }
+}
+
+
+function isAdmin(req) {
+    if (req.session.user_type == 'admin') {
+        return true;
+    }
+    return false;
+}
+
+function adminAuthorization(req, res, next) {
+    if (!isAdmin(req)) {
+        res.status(403);
+        res.render("errorMessage", {error: "Not Authorized"});
+        return;
+    }
+    else {
+        next();
+    }
+}
+
+//middle ware
+app.use("/", (req,res,next) => {
+    app.locals.navLinks = navLinks;
+    app.locals.currentURL = url.parse(req.url).pathname;
+    next();
+});
+
 app.get('/', (req,res) => {
     if (!req.session.authenticated) {
-        var html = `
-        <div><a href="/signup">Sign Up</a></div>
-        <div><a href="/login">Log In</a></div>
-        `;
-        res.send(html);
+        res.render("index_noLogin");
     } else {
-        var html = `
-        <p>Hello, ${req.session.name}!</p>
-        <form action='/members' method='get'><button>Go To Members Area</button></form>
-        <form action='/logout' method='get'><button>Logout</button></form>
-        `;
-        res.send(html);
+        res.render("index_loggedIn", {req: req});
     }
 });
 
 app.get('/nosql-injection', async (req,res) => {
-	var username = req.query.user;
+	var name = req.query.user;
 
-	if (!username) {
+	if (!name) {
 		res.send(`<h3>no user provided - try /nosql-injection?user=name</h3> <h3>or /nosql-injection?user[$ne]=name</h3>`);
 		return;
 	}
-	console.log("user: "+username);
+	console.log("user: "+name);
 
 	const schema = Joi.string().max(20).required();
-	const validationResult = schema.validate(username);
+	const validationResult = schema.validate(name);
 
 	//If we didn't use Joi to validate and check for a valid URL parameter below
 	// we could run our userCollection.find and it would be possible to attack.
@@ -90,11 +134,11 @@ app.get('/nosql-injection', async (req,res) => {
 	   return;
 	}	
 
-	const result = await userCollection.find({username: username}).project({username: 1, password: 1, _id: 1}).toArray();
+	const result = await userCollection.find({name: name}).project({name: 1, password: 1, _id: 1}).toArray();
 
 	console.log(result);
 
-    res.send(`<h1>Hello ${username}</h1>`);
+    res.send(`<h1>Hello ${name}</h1>`);
 });
 
 app.get('/about', (req,res) => {
@@ -105,29 +149,12 @@ app.get('/about', (req,res) => {
 
 
 app.get('/signup', (req,res) => {
-    var html = `
-    create user
-    <form action='/signupSubmit' method='post'>
-    <input name='name' type='text' placeholder='name'></br>
-    <input name='email' type='email' placeholder='email'></br>
-    <input name='password' type='password' placeholder='password'></br>
-    <button>Submit</button>
-    </form>
-    `;
-    res.send(html);
+    res.render("signup");
 });
 
 
 app.get('/login', (req,res) => {
-    var html = `
-    log in
-    <form action='/loginSubmit' method='post'>
-    <input name='email' type='email' placeholder='email'>
-    <input name='password' type='password' placeholder='password'>
-    <button>Submit</button>
-    </form>
-    `;
-    res.send(html);
+    res.render("login");
 });
 
 app.post('/signupSubmit', async (req,res) => {
@@ -145,11 +172,7 @@ app.post('/signupSubmit', async (req,res) => {
 	if (validationResult.error != null) {
         var errorMessage = validationResult.error.message;
         console.log(validationResult.error);
-        var html = `
-        ${errorMessage}.</br>
-        <a href="/signup">Try Again</a>
-        `;
-        res.send(html);
+        res.render("signupError", {errorMessage: errorMessage});
         return;
     }
 
@@ -173,75 +196,23 @@ app.post('/loginSubmit', async (req, res) => {
 		password: Joi.string().max(20).required()
 	});
 	
-	const validationResult = schema.validate({email, password});
-	if (validationResult.error != null) {
-        var errorMessage = validationResult.error.message;
-        console.log(validationResult.error);
-        var html = `
-        ${errorMessage}.</br>
-        <a href="/login">Try Again</a>
-        `;
-        res.send(html);
-        return;
-    }
-	
     const result = await userCollection.findOne({ email });
     if (!result) {
-        const html = `
-            Invalid email/password combination.</br>
-            <a href='/login'>Try Again </a>
-        `;
-        return res.send(html);
+        return res.render("invalidLogin");
     }
 
+    // const result2 = await userCollection.find({email: email}).project({name: 1, email: 1, password: 1, user_type: 1, _id: 1}).toArray();
     const passwordMatches = await bcrypt.compare(password, result.password);
     if (passwordMatches) {
         req.session.authenticated = true;
         req.session.name = result.name;
         req.session.email = email;
+        req.session.user_type = result.user_type;
         req.session.cookie.maxAge = expireTime;
 
         return res.redirect('/members');
     } else {
-        const html = `
-            Invalid email/password combination.</br>
-            <a href='/login'>Try Again</a>
-        `;
-        return res.send(html);
-    }
-});
-
-app.get('/members', (req,res) => {
-    if (!req.session.authenticated) {
-        res.redirect('/login');
-        return;
-    }
-
-    var cat = Math.floor(Math.random() * 3) + 1;
-
-    if (cat == 1) {
-        var html = `
-        <h1> Hello, ${req.session.name}</h1></br>
-        <img src='/fluffy.gif' style='width:250px;'></br>
-        <a href='/logout'>Sign out</a>`;
-        res.send(html);
-    }
-    else if (cat == 2) {
-        var html = `
-        <h1> Hello, ${req.session.name}</h1></br>
-        <img src='/socks.gif' style='width:250px;'></br>
-        <a href='/logout'>Sign out</a>`;
-        res.send(html);
-    }
-    else if (cat == 3) {
-        var html = `
-        <h1> Hello, ${req.session.name}</h1></br>
-        <img src='/computer.gif' style='width:250px;'></br>
-        <a href='/logout'>Sign out</a>`;
-        res.send(html);
-    }
-    else {
-        res.send("Invalid cat id: "+cat);
+        return res.render("invalidLogin");
     }
 });
 
@@ -250,6 +221,42 @@ app.get('/logout', (req,res) => {
     res.redirect('/');
 });
 
+app.get('/members', (req,res) => {
+    if (!req.session.authenticated) {
+        res.redirect('/login');
+    } else {
+        res.render("members");
+    }
+});
+
+app.get('/admin', sessionValidation, adminAuthorization, async (req,res) => {
+    const result = await userCollection.find().project({name: 1, _id: 1, user_type: 1}).toArray();
+ 
+    res.render("admin", {users: result});
+});
+
+app.get('/promote/:id', async (req, res) => {
+    try {
+        const id = req.params.id;
+        await userCollection.updateOne({ _id: ObjectId(id) }, { $set: { user_type: 'admin' } });
+        res.redirect('/admin');
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Internal Server Error');
+    }
+});
+  
+app.get('/demote/:id', async (req, res) => {
+    try {
+        const id = req.params.id;
+        await userCollection.updateOne({ _id: ObjectId(id) }, { $set: { user_type: 'user' } });
+        res.redirect('/admin');
+    } catch (err) {
+        console.error(err);
+        res.status(500).send('Internal Server Error');
+    }
+});
+  
 app.use(express.static(__dirname + "/public"));
 
 app.get("*", (req,res) => {
